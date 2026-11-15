@@ -257,6 +257,7 @@ export function recruitmentRegistry(deps: AgentDeps, opts: PipelineRunOptions): 
   const verifyParallel = parallel('evaluate-and-verify', { items: (b: Batch) => b.screened.map((candidate) => ({ candidate, deep: b.shortlist.includes(candidate.resumeId) })), key: (v) => v.candidate.resumeId, concurrency: (b) => Math.max(1, b.prepared.plan.pools.review + b.prepared.plan.pools.assess), failure: 'collect', body: candidateBody });
   const finishBatch = task({ id: 'finish-batch', input: z.object({ input: batchSchema, result: z.array(outcomeSchema(resultSchema)) }), output: batchResultSchema, recovery: 'retry', handler: ({ input, result }) => {
     const evaluated = result.filter((r) => r.ok).length;
+    for (const failed of result.filter((r) => !r.ok)) emit('batch.verify_failure', { batchId: input.batchId, resumeId: failed.key, error: failed.error });
     const value = { batchId: input.batchId, parsed: input.parsed.length, evaluated };
     emit('batch.completed', { ...value, failed: result.length - evaluated, deep: input.shortlist.length }); return value;
   } });
