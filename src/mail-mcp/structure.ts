@@ -37,12 +37,15 @@ export function extensionOf(name: string): string {
 }
 
 /**
- * 第一层过滤：只放行 pdf/docx/doc、图片和纯文本/HTML，且不超过 25MB。
+ * 第一层过滤：只放行 pdf/docx/doc、图片和纯文本/HTML。
  * 这里不做简历判定，判定在 Bole 侧 triage 里做。
+ * 注意：BODYSTRUCTURE 的 size 是 base64 编码后体积，约真实值的 4/3，
+ * 不能拿它做 25MB 上限判定（会把 18.75MB 以上的合法附件误拒）；
+ * 大小上限统一由调用方按落盘（解码后）字节判定。
  */
 export function isResumeCandidate(node: BodyNode): boolean {
   if (!isAttachment(node)) return false;
-  return RESUME_EXTENSIONS.has(extensionOf(attachmentName(node))) && (node.size ?? 0) <= MAX_ATTACHMENT_BYTES;
+  return RESUME_EXTENSIONS.has(extensionOf(attachmentName(node)));
 }
 
 /** uidValidity 是 bigint，必须显式转字符串，JSON.stringify 不能序列化 bigint */

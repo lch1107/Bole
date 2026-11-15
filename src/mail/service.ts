@@ -11,6 +11,7 @@ import { ApprovalStore } from '../core/approvals.ts';
 import { MailAdapterStore, mailAdapterSchema, resolveMailAdapter } from './adapters.ts';
 import { isLikelySpam, matchResumeKeyword } from './triage.ts';
 import { detectFileKind, detectImageMime, kindMatchesExtension } from './file-kind.ts';
+import { MAX_ATTACHMENT_BYTES } from '../mail-mcp/structure.ts';
 import { classifyImageResume, classifyResume, type ResumeVerdict } from './resume-classifier.ts';
 import { imageMimeType, normalizeDocument } from '../ingest/normalize.ts';
 
@@ -39,7 +40,15 @@ export function freezeMailboxQuery(query: MailboxQuery, ledger: Ledger): Mailbox
   return { ...query, adapter: mailAdapterSchema.parse(definition) };
 }
 const pageSchema = z.object({ data: z.array(z.object({ message_id: z.string().min(1).max(512) })), pagination: z.object({ has_more: z.boolean(), next_cursor: z.string().nullable().optional() }).optional() });
-const messageSchema = z.object({ message_id: z.string(), from: z.object({ email: z.email() }), subject: z.string().optional(), attachments: z.array(z.object({ attachment_id: z.string().min(1).max(512).optional(), filename: z.string(), size: z.coerce.number().nonnegative().optional() })) });
+const attachmentSchema = z
+  .object({
+    attachment_id: z.string().min(1).max(512).optional(),
+    attachmentId: z.string().min(1).max(512).optional(),
+    filename: z.string(),
+    size: z.coerce.number().nonnegative().optional(),
+  })
+  .transform((value) => ({ attachment_id: value.attachment_id ?? value.attachmentId, filename: value.filename, size: value.size }));
+const messageSchema = z.object({ message_id: z.string(), from: z.object({ email: z.email() }), subject: z.string().optional(), attachments: z.array(attachmentSchema) });
 
 /** Bounded inbox import. Search filters survive pagination; no mark-read, deletion or URL fetching. */
 export async function collectMailbox(deps: AgentDeps, query: MailboxQuery, command: MailCommand = mailCommand): Promise<UploadedFile[]> {
@@ -65,7 +74,8 @@ export async function collectMailbox(deps: AgentDeps, query: MailboxQuery, comma
         const keyword = matchResumeKeyword(message.subject ?? '', message.attachments.map((attachment) => attachment.filename));
         deps.events.emit(deps.jobId, 'fetcher', 'mail.triage.keyword', { messageId: message.message_id, keyword, matched: keyword !== null });
         for (const attachment of message.attachments) {
-          if (!isSupportedUpload(attachment.filename) || !attachment.attachment_id || (attachment.size ?? 0) > 25 * 1024 * 1024) {
+          // 25MB 上限按落盘（解码后）字节判定，不能用 BODYSTRUCTURE 的编码后体积提前拒绝
+          if (!isSupportedUpload(attachment.filename) || !attachment.attachment_id) {
             deps.events.emit(deps.jobId, 'fetcher', 'mail.attachment.skipped', { messageId: message.message_id, filename: attachment.filename, reason: '不支持的格式、超大附件或无普通附件 ID' });
             continue;
           }
@@ -79,7 +89,11 @@ export async function collectMailbox(deps: AgentDeps, query: MailboxQuery, comma
             const root = await realpath(dir);
             const relative = path.relative(root, saved);
             if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('下载附件路径越界');
-            if ((await stat(saved)).size > 25 * 1024 * 1024) throw new Error('附件超过 25MB');
+            const savedSize = (await stat(saved)).size;
+            if (savedSize > MAX_ATTACHMENT_BYTES) {
+              deps.events.emit(deps.jobId, 'fetcher', 'mail.attachment.skipped', { messageId: message.message_id, filename: attachment.filename, size: savedSize, reason: `附件实际大小 ${savedSize} 字节，超过 25MB 上限` });
+              continue;
+            }
             const buffer = await readFile(saved);
             const kind = detectFileKind(buffer, attachment.filename);
             if (!kind) {

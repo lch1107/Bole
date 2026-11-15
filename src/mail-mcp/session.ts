@@ -124,36 +124,49 @@ export class ImapSession {
       // 招聘场景优先看最近投递：UID 降序，最新邮件排在最前
       uids = [...uids].sort((a, b) => b - a);
 
-      const page = uids.slice(0, options.limit);
-      if (!page.length) return { data: [], pagination: { has_more: false, next_cursor: null } };
-
-      const messages = await client.fetchAll(
-        page,
-        { uid: true, envelope: true, bodyStructure: true },
-        { uid: true },
-      );
-
       const keyword = options.query?.trim().toLowerCase() ?? '';
       const data: Array<{ message_id: string }> = [];
-      for (const message of messages) {
-        const subject = message.envelope?.subject ?? '';
-        const from = message.envelope?.from?.[0]?.address ?? '';
-        if (keyword) {
-          const hit = subject.toLowerCase().includes(keyword) || from.toLowerCase().includes(keyword);
-          if (!hit) continue;
+      let cursorUid: number | null = null;
+      let hasMore = false;
+      let index = 0;
+      const batchSize = Math.max(options.limit, 20);
+
+      // 先按关键词 / 是否含可投递附件过滤，再凑满一页：
+      // 避免“整页被滤空”返回空数组、以及 has_more 按未过滤数量计算导致空页仍提示还有更多。
+      while (index < uids.length && data.length < options.limit) {
+        const batch = uids.slice(index, index + batchSize);
+        index += batch.length;
+        const messages = await client.fetchAll(
+          batch,
+          { uid: true, envelope: true, bodyStructure: true },
+          { uid: true },
+        );
+        // fetchAll 不保证保持入参顺序，这里显式按 UID 降序重排，防止翻页顺序反转
+        messages.sort((a, b) => b.uid - a.uid);
+        for (let i = 0; i < messages.length; i++) {
+          const message = messages[i];
+          const subject = message.envelope?.subject ?? '';
+          const from = message.envelope?.from?.[0]?.address ?? '';
+          if (keyword) {
+            const hit = subject.toLowerCase().includes(keyword) || from.toLowerCase().includes(keyword);
+            if (!hit) continue;
+          }
+          const attachments = leaves(message.bodyStructure).filter(isResumeCandidate);
+          if (!attachments.length) continue;
+          data.push({ message_id: encodeId(uidValidity, message.uid) });
+          cursorUid = message.uid;
+          if (data.length >= options.limit) {
+            hasMore = i < messages.length - 1 || index < uids.length;
+            break;
+          }
         }
-        const attachments = leaves(message.bodyStructure).filter(isResumeCandidate);
-        if (!attachments.length) continue;
-        data.push({ message_id: encodeId(uidValidity, message.uid) });
       }
 
-      const last = page[page.length - 1];
-      const hasMore = uids.length > page.length;
       return {
         data,
         pagination: {
           has_more: hasMore,
-          next_cursor: hasMore ? encodeId(uidValidity, last) : null,
+          next_cursor: hasMore && cursorUid !== null ? encodeId(uidValidity, cursorUid) : null,
         },
       };
     });

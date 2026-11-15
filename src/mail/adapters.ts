@@ -73,9 +73,12 @@ export function agentlyAdapter(command: MailCommand = mailCommand): MailAdapter 
     send: (v) => command(['message', '+send', '--to', v.to, '--subject', v.subject, '--body', v.body, '--body-format', 'plain', '--confirmed']),
   };
 }
-export type AdapterRunner = (command: string, args: string[], cwd?: string) => Promise<unknown>;
-const run: AdapterRunner = (command, args, cwd) => new Promise((resolve, reject) => {
-  execFile(command, args, { cwd, windowsHide: true, timeout: 90000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+export type AdapterRunner = (command: string, args: string[], cwd?: string, timeoutMs?: number) => Promise<unknown>;
+const CLI_TIMEOUT_MS = 90_000;
+// 与 src/mail/client.ts 的 DOWNLOAD_TIMEOUT_MS 保持一致：55KB/s 下 27MB 约需 500s。
+const CLI_DOWNLOAD_TIMEOUT_MS = 600_000;
+const run: AdapterRunner = (command, args, cwd, timeoutMs) => new Promise((resolve, reject) => {
+  execFile(command, args, { cwd, windowsHide: true, timeout: timeoutMs ?? CLI_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
     try {
       const value: unknown = JSON.parse(stdout);
       if (error || value && typeof value === 'object' && 'ok' in value && value.ok === false) { reject(new Error('邮箱适配器调用失败，请检查对应 CLI 的授权与接口配置；发信结果不确定时请人工核对，勿自动重发')); return; }
@@ -93,7 +96,8 @@ export function configuredAdapter(definition: MailAdapterDefinition, runner: Ada
   const d = cliAdapterSchema.parse(definition);
   const invoke = async (op: keyof typeof d.operations, input: Record<string, unknown>, cwd?: string) => {
     const replace = (s: string) => s.replace(/\{([a-zA-Z]+)\}/g, (_all, name: string) => name === 'input' ? JSON.stringify(input) : String(input[name] ?? ''));
-    const value = await runner(d.command, [...d.baseArgs, ...d.operations[op].args.map(replace)], cwd);
+    // 下载附件按大文件放宽时限，其余操作沿用通用 90s，避免大简历必然超时
+    const value = await runner(d.command, [...d.baseArgs, ...d.operations[op].args.map(replace)], cwd, op === 'download' ? CLI_DOWNLOAD_TIMEOUT_MS : CLI_TIMEOUT_MS);
     return field(value, d.operations[op].resultPath);
   };
   return {
